@@ -955,90 +955,138 @@ function carregarDadosAPI(){
     return;
   }
 
-  // Callback simples e global para máxima compatibilidade com HTML aberto localmente.
-  const callbackName = "tremEscolas";
-  let finalizado = false;
+  // Conexão robusta: até 3 tentativas, com timeout de 10 segundos.
+  const MAX_TENTATIVAS = 3;
+  const TEMPO_ESPERA = 10000;
+  let tentativa = 0;
+  let encerrado = false;
+  let timer = null;
+  let tagAtual = null;
+  let callbackAtual = null;
 
-  function limpar(){
-    const tag = document.getElementById("trem-api-escolas");
-    if(tag) tag.remove();
-    try { delete window[callbackName]; } catch(e) {}
+  function limparTentativa(){
+    if(timer){ clearTimeout(timer); timer = null; }
+    if(tagAtual){ tagAtual.remove(); tagAtual = null; }
+    if(callbackAtual){
+      try { delete window[callbackAtual]; } catch(e) {}
+      callbackAtual = null;
+    }
   }
 
-  window[callbackName] = function(payload){
-    if(finalizado) return;
-    finalizado = true;
-
-    try{
-      if(!payload || payload.success !== true){
-        throw new Error(payload && payload.error ? payload.error : "Resposta inválida da API.");
-      }
-
-      if(!Array.isArray(payload.schools)){
-        throw new Error("A API respondeu, mas não enviou a lista de escolas.");
-      }
-
-      schools = payload.schools;
-
-      console.log("Trem da Formação: dados recebidos da Planilha Oficial Trem da Formação:", schools.length, "escolas");
-
-      // Registra o momento em que a página recebeu os dados reais.
-      // O painel geral é reconstruído logo depois, então aplicamos o relógio
-      // novamente após o evento tremDataReady.
-      const agoraPagina = new Date();
-      const dataFormatada = agoraPagina.toLocaleDateString("pt-BR");
-      const horaFormatada = agoraPagina.toLocaleTimeString("pt-BR");
-      const textoUltimaAtualizacao = dataFormatada + " às " + horaFormatada;
-
-      // O painel geral substitui o conteúdo do painel antigo.
-      // Portanto, primeiro avisamos o painel geral para ele se reconstruir
-      // com os dados reais. Só atualizamos o painel antigo se ele ainda existir.
-      window.dispatchEvent(new CustomEvent("tremDataReady"));
-
-      // O evento acima reconstrói o painel geral. Agora que ele existe,
-      // registramos definitivamente a data/hora da última atualização.
-      const updateEl = document.getElementById("lastPageUpdate");
-      if(updateEl){
-        updateEl.textContent = textoUltimaAtualizacao;
-      }
-
-      if(document.getElementById("mSchools")){
-        refreshSchools();
-        render();
-      }
-
-    }catch(err){
-      mostrarErroAPI(err.message || String(err));
-    }finally{
-      limpar();
+  function mostrarStatus(msg){
+    console.log("Trem da Formação:", msg);
+    const race = document.getElementById("generalRace") || document.getElementById("race");
+    if(race && (!schools || schools.length === 0)){
+      race.innerHTML =
+        '<div style="padding:18px;border:1px solid #dce5ef;background:#f7f9fc;border-radius:12px;color:#52627a;font-weight:700;text-align:center;">' +
+        msg + '</div>';
     }
-  };
+  }
 
-  const tag = document.createElement("script");
-  tag.id = "trem-api-escolas";
-  tag.async = true;
-  tag.src = API_URL + "?action=schools&callback=" + callbackName + "&t=" + Date.now();
+  function concluirComErro(msg){
+    if(encerrado) return;
+    encerrado = true;
+    limparTentativa();
+    mostrarErroAPI(msg);
+  }
 
-  tag.onerror = function(){
-    if(finalizado) return;
-    finalizado = true;
-    mostrarErroAPI("O HTML não conseguiu acessar a API. Verifique a URL da implantação e a permissão 'Qualquer pessoa'.");
-    limpar();
-  };
+  function tentar(){
+    if(encerrado) return;
+    tentativa++;
+    limparTentativa();
 
-  document.head.appendChild(tag);
+    const callbackName = "__tremEscolas_" + Date.now() + "_" + tentativa;
+    callbackAtual = callbackName;
+    let finalizadoTentativa = false;
 
-  // Se a resposta não chegar, deixa o diagnóstico visível na própria página.
-  setTimeout(function(){
-    if(finalizado) return;
-    finalizado = true;
-    mostrarErroAPI("A API não respondeu dentro do tempo esperado.");
-    limpar();
-  }, 15000);
+    window[callbackName] = function(payload){
+      if(encerrado || finalizadoTentativa) return;
+      finalizadoTentativa = true;
+
+      try{
+        if(!payload || payload.success !== true){
+          throw new Error(payload && payload.error ? payload.error : "Resposta inválida da API.");
+        }
+        if(!Array.isArray(payload.schools)){
+          throw new Error("A API respondeu, mas não enviou a lista de escolas.");
+        }
+
+        schools = payload.schools;
+        console.log("Trem da Formação: dados recebidos:", schools.length, "escolas");
+
+        const agoraPagina = new Date();
+        const textoUltimaAtualizacao =
+          agoraPagina.toLocaleDateString("pt-BR") + " às " +
+          agoraPagina.toLocaleTimeString("pt-BR");
+
+        window.dispatchEvent(new CustomEvent("tremDataReady"));
+
+        const updateEl = document.getElementById("lastPageUpdate");
+        if(updateEl) updateEl.textContent = textoUltimaAtualizacao;
+
+        if(document.getElementById("mSchools")){
+          refreshSchools();
+          render();
+        }
+
+        encerrado = true;
+        limparTentativa();
+
+      }catch(err){
+        limparTentativa();
+        if(tentativa < MAX_TENTATIVAS){
+          mostrarStatus("Tentativa " + tentativa + " de " + MAX_TENTATIVAS + " falhou. Tentando novamente...");
+          setTimeout(tentar, 1000 * tentativa);
+        }else{
+          concluirComErro("A API respondeu, mas os dados não puderam ser carregados. Tente atualizar a página.");
+        }
+      }
+    };
+
+    const tag = document.createElement("script");
+    tag.id = "trem-api-escolas";
+    tag.async = true;
+    tag.src = API_URL + "?action=schools&callback=" +
+      encodeURIComponent(callbackName) + "&t=" + Date.now();
+
+    tag.onerror = function(){
+      if(encerrado || finalizadoTentativa) return;
+      finalizadoTentativa = true;
+      limparTentativa();
+
+      if(tentativa < MAX_TENTATIVAS){
+        mostrarStatus("Não foi possível obter os dados na tentativa " + tentativa + ". Tentando novamente...");
+        setTimeout(tentar, 1000 * tentativa);
+      }else{
+        concluirComErro("Não foi possível acessar a API após " + MAX_TENTATIVAS + " tentativas.");
+      }
+    };
+
+    tagAtual = tag;
+    document.head.appendChild(tag);
+
+    timer = setTimeout(function(){
+      if(encerrado || finalizadoTentativa) return;
+      finalizadoTentativa = true;
+      limparTentativa();
+
+      if(tentativa < MAX_TENTATIVAS){
+        mostrarStatus("A resposta está demorando. Tentando novamente (" +
+          (tentativa + 1) + "/" + MAX_TENTATIVAS + ")...");
+        setTimeout(tentar, 1000 * tentativa);
+      }else{
+        concluirComErro("A API não respondeu após " + MAX_TENTATIVAS +
+          " tentativas. Atualize a página e tente novamente.");
+      }
+    }, TEMPO_ESPERA);
+  }
+
+  mostrarStatus("Conectando à Planilha Oficial Trem da Formação...");
+  tentar();
 }
 function mostrarErroAPI(msg){
   console.error(msg);
-  const race=document.getElementById("race");
+  const race=document.getElementById("generalRace") || document.getElementById("race");
   if(race){
     race.innerHTML='<div style="padding:18px;border:1px solid #e5b4b4;background:#fff5f5;border-radius:12px;color:#8a2020;font-weight:700;">Erro ao carregar os dados da Planilha Oficial Trem da Formação: '+msg+'</div>';
   }
